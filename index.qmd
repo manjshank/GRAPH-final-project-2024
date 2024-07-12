@@ -1,0 +1,305 @@
+---
+title: "Gapminder | Female Labour Force Participation 2019"
+author: "-Manjari Shankar"
+format: 
+  dashboard:
+    embed-resources: true
+    nav-buttons: [github]
+    github: https://github.com/YOUR_URL
+theme: flatly
+fig-width: 10
+fig-asp: 0.3
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+# Load packages 
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse, 
+               gapminder,
+               here,
+               sf,
+               bslib, 
+               bsicons,
+               rnaturalearth, 
+               plotly, 
+               countrycode, 
+               htmltools, 
+               reactable,
+               janitor,
+               shiny
+               )
+```
+
+```{r data loading}
+
+total_fert <- read.csv(here("data/children_per_woman_total_fertility.csv"))
+female_lbfr <- read.csv(here("data/females_aged_25_54_labour_force_participation_rate_percent.csv"))
+total_women <- read.csv(here("data/sp_pop_totl_fe_in.csv"))
+country_shapes <- rnaturalearth::ne_countries()
+
+```
+
+```{r data cleaning}
+continent_data <- country_shapes %>% 
+  select(iso_a3, continent)
+
+# babies per woman dataset
+total_fert <- total_fert %>% 
+  mutate(iso_code = countrycode(
+    country, 
+    "country.name", 
+    "iso3c")) %>% 
+  select(country, iso_code, X1999:X2019) %>% 
+  pivot_longer(cols = c(X1999:X2019),
+               names_to = "year",
+               values_to = "fertility_rate") %>% 
+  mutate(year = str_remove(year, "X"))
+
+# LBFR dataset
+female_lbfr <- female_lbfr %>% 
+  mutate(iso_code = countrycode(
+    country, 
+    "country.name", 
+    "iso3c")) %>%
+  select(country, iso_code, X1999:X2019) %>% 
+  pivot_longer(cols = c(X1999:X2019),
+               names_to = "year",
+               values_to = "lbfr_rate") %>% 
+  mutate(year = str_remove(year, "X"))
+
+# LBFR-Fert combined
+
+lbfr_fert <- female_lbfr %>% 
+  left_join(total_fert, by = c("iso_code", "year"))
+
+lbfr_fert_comb <- lbfr_fert %>% 
+  left_join(continent_data, by = c("iso_code" = "iso_a3")) %>% 
+  select(-country.y)
+
+
+# Total women dataset
+total_women <- total_women %>% 
+    mutate(iso_code = countrycode(
+    country, 
+    "country.name", 
+    "iso3c")) %>%
+  select(country, iso_code, X1999:X2019) %>% 
+  pivot_longer(cols = c(X1999:X2019),
+               names_to = "year",
+               values_to = "total_pop") %>% 
+  mutate(year = str_remove(year, "X")) %>% 
+  mutate(pop_numeric = case_when(
+    str_detect(total_pop, "M$") ~ as.numeric(str_replace_all(total_pop, "M", "")) * 1e6,
+    str_detect(total_pop, "k$") ~ as.numeric(str_replace_all(total_pop, "k", "")) * 1e3,
+    TRUE ~ as.numeric(total_pop)
+  )) %>% 
+  select(-total_pop)
+
+# 2019 data
+total_fert_2019 <- total_fert %>% 
+  filter(year == 2019)
+
+female_lbfr_2019 <- female_lbfr %>% 
+  filter(year == 2019)
+
+total_women_2019 <- total_women %>% 
+  filter(year == 2019) %>% 
+  mutate(pop_numeric = as.numeric(pop_numeric))
+
+lbfr_2019_comb <- female_lbfr_2019 %>% 
+  left_join(total_women_2019, by = "iso_code") %>% 
+  select(country.x, iso_code, lbfr_rate, pop_numeric) %>% 
+  mutate(
+    pop_numeric = as.numeric(pop_numeric),
+    female_lab = (lbfr_rate / 100) * pop_numeric
+  ) %>% 
+  filter(!is.na(pop_numeric) & !is.na(female_lab)) %>% 
+  mutate(female_lab = as.numeric(female_lab))
+
+# Valuebox stats
+
+lbfr_highest <- female_lbfr_2019 %>% 
+  arrange(-lbfr_rate) %>% 
+  head(1) %>% 
+  pull(lbfr_rate)
+
+lbfr_highest_country <- female_lbfr_2019 %>% 
+  arrange(-lbfr_rate) %>% 
+  head(1) %>% 
+  pull(country)
+
+lbfr_lowest <- female_lbfr_2019 %>% 
+  arrange(lbfr_rate) %>% 
+  head(1) %>% 
+  pull(lbfr_rate)
+
+lbfr_lowest_country <- female_lbfr_2019 %>% 
+  arrange(lbfr_rate) %>% 
+  head(1) %>% 
+  pull(country)
+
+avg_lbfr <- lbfr_2019_comb %>%
+  summarise(avg = sum(female_lab) / sum(pop_numeric, na.rm = TRUE) * 100) %>% 
+  round(1)
+
+# Generate LBFR map
+
+lbfr_map <- left_join(country_shapes, female_lbfr_2019, by = c("adm0_a3" = "iso_code")) %>% 
+  mutate(tooltip = paste(country, round(lbfr_rate, 1), sep = ": ")) %>% 
+  ggplot() +
+  geom_sf(aes(fill = lbfr_rate, text = tooltip)) +
+  scale_fill_viridis_c() +
+  theme_void() +
+  theme(legend.position = "right") +
+  labs(fill = "LBFR %")
+
+# Generate top20 graph
+top20 <- lbfr_2019_comb %>% 
+  arrange(desc(female_lab)) %>% 
+  mutate(tooltip = case_when(
+      female_lab >= 1e6 ~ paste(country.x, round(female_lab / 1e6, 1), "M"),
+      female_lab >= 1e3 ~ paste(country.x,round(female_lab / 1e3, 1), "k"),
+      TRUE ~ as.character(round(female_lab, 1))
+    )) %>% 
+  head(20) %>% 
+  ggplot(aes(x = female_lab, 
+             y = reorder(iso_code, female_lab), 
+             fill = female_lab,
+             text = tooltip)) +
+  geom_col() + 
+  scale_x_continuous(labels = scales::label_number(scale = 1e-6, suffix = "M")) +
+  labs(x = "Total Female Labor",
+       y = "Country") +
+  theme_classic() +
+  theme(legend.position = "none")
+
+top20_plotly <- 
+  ggplotly(top20, tooltip = "text") 
+
+# Correlation plotly
+gg <- lbfr_fert_comb %>% 
+ ggplot(aes(x = fertility_rate, y = lbfr_rate, color = continent, frame = year, text = country.x)) +
+ geom_point() +
+ scale_x_log10() +
+ theme_minimal() +
+  labs(x = "Babies per woman",
+       y = "LBFR %") 
+
+plotly_correlation <- ggplotly(gg, tooltip = "text")
+```
+
+#  {.sidebar width="20%"}
+
+Indicators used in this dashboard:
+
+| **Indicator**  | Female Labour Force Participation Rate (%)                         |
+|-------------------|-----------------------------------------------------|
+| **Definition** | For age-group 25-54, % of female labour to total female population |
+| **Year**       | 2019                                                               |
+| **Source**.    | https://www.ilo.org/ilostat/                                       |
+
+------------------------------------------------------------------------
+
+| **Indicator**  | Babies per woman (total fertility)                                            |
+|-------------------|-----------------------------------------------------|
+| **Definition** | \# of children born to each woman with prevailing age-specific fertility rate |
+| **Year**       | 2019                                                                          |
+| **Source**.    | http://gapm.io/dtfr                                                           |
+
+# Home
+
+## Summary {height="30%"}
+
+```{r valuebox1}
+value_box(
+  title = "Highest LBFR (2019)",
+  value = lbfr_highest,
+  showcase = bs_icon("gender-female"),
+  theme = value_box_theme(bg = "#803245"),
+  p(paste0("(", lbfr_highest_country, ")"))
+)
+```
+
+```{r valuebox2}
+value_box(
+  title = "Lowest LBFR (2019)",
+  value = lbfr_lowest,
+  showcase = bs_icon("person-standing-dress"),
+  theme = value_box_theme(bg = "#b83959"),
+  p(paste0("(", lbfr_lowest_country, ")"))
+)
+```
+
+```{r valuebox3}
+value_box(
+  title = "Average LBFR (2019)",
+  value = avg_lbfr,
+  showcase = bs_icon("handbag"),
+  theme = value_box_theme(bg = "#a81d60")
+)
+```
+
+## World map {height="80%"}
+
+###  {width="60%"}
+
+```{r title = "Countries by Labour Force Participation Rate (LBFR)"}
+plotly_map <- 
+  ggplotly(lbfr_map, tooltip = "text") %>% 
+  layout(autoscale = TRUE)
+plotly_map
+```
+
+###  {width="40%"}
+
+```{r title = "Top 20 countries with largest female workforce in 2019"}
+top20_plotly
+```
+
+# Female Fertility vs Employment
+
+> **Objective**: Women's labor force participation has increased significantly in the last century, including LMICs and all sectors.The same period has seen dramatic declines in global fertility trajectories.The correlation below stems from curiosity around all the literature around this.
+
+```{r title = "Babies per woman vs Female LBFR: 1999-2019"}
+plotly_correlation
+```
+
+# Data
+
+The data used in this dashboard is shown below and can be downloaded as a CSV.
+
+```{r}
+library(htmltools)
+
+htmltools::browsable(
+  tagList(
+    reactable(lbfr_fert_comb,
+          searchable = TRUE, filterable = TRUE,
+      elementId = "gapminder-table"),
+    
+    tags$button("Download as CSV", onclick = "Reactable.downloadDataCSV('gapminder-table')"),
+  )
+)
+```
+
+# About
+
+This data comes from the r `gapminder` package and is originally sourced from the Gapminder Foundation.
+
+Gapminder Foundation is a non-profit venture registered in Stockholm, Sweden, that promotes sustainable global development and achievement of the United Nations Millennium Development Goals by increased use and understanding of statistics and other information about social, economic, and environmental development at local, national, and global levels.
+
+Gapminder was founded in 2005 by Ola Rosling, Anna Rosling Rönnlund, and Hans Rosling. The name Gapminder was derived from the "Mind the Gap" warning messages on the London Underground.
+
+One of Hans Rosling's videos:
+
+::: {style="max-width:854px"}
+::: {style="position:relative;height:0;padding-bottom:56.25%"}
+<iframe src="https://embed.ted.com/talks/lang/en/hans_rosling_the_best_stats_you_ve_ever_seen" width="854" height="480" style="position:absolute;left:0;top:0;width:100%;height:100%" frameborder="0" scrolling="no" allowfullscreen>
+
+</iframe>
+:::
+:::
